@@ -20,7 +20,10 @@ with GestureRecognizer.create_from_options(options) as recognizer:
     images = []
     results = []
     # STEP 3: Load the input image.
-    path = filedialog.askopenfilename()
+    path = input("Введите путь до изображения: ")
+    str_tmp = path.split('/')
+    str_tmp.pop()
+    folder_path = '/'.join(str_tmp)
     mp_image = mp.Image.create_from_file(path)
 
     # STEP 4: Recognize gestures in the input image.
@@ -31,15 +34,13 @@ with GestureRecognizer.create_from_options(options) as recognizer:
     hand_landmarks = recognition_result.hand_landmarks
     results.append(hand_landmarks)
 
-    contours = []
-
-    Visualisation_Utilities.display_hand_landmarks(images, results, False)
+    image_num = Visualisation_Utilities.display_hand_landmarks(images, results, False, folder_path, 1)
 
     img = mp_image.numpy_view()
     img = np.full_like(img, 255, dtype=np.uint8)
     img_PIL = Image.fromarray(img)
-    filename = "C:/Users/Administrator/PycharmProjects/practice_Hand_Gestures/white.png"
+    filename = folder_path + "/white.png"
     img_PIL.save(filename)
     images[0] = mp.Image.create_from_file(filename)
 
-    Visualisation_Utilities.display_hand_landmarks(images, results, True)
+    Visualisation_Utilities.display_hand_landmarks(images, results, True, folder_path, image_num)

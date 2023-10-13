@@ -1,49 +1,84 @@
 import math
+
 import cv2
 import numpy as np
 from PIL import Image
 import mediapipe as mp
 from mediapipe.framework.formats import landmark_pb2
-import brush
-from tkinter import filedialog
 
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 sigma = 0.44
-accurately_contours = []
 rect = []
-image_wh = []
 
 
-def find_accurate_contour(img):
-    global accurately_contours
-    # define the upper and lower boundaries of the HSV pixel intensities
-    # to be considered 'skin'
-    hsvim = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    lower = np.array((0, 50, 128), dtype="uint8")
-    upper = np.array((179, 255, 255), dtype="uint8")
+def count_white_points(img, folder_path):
 
-    # накладываем фильтр на кадр в модели HSV
-    thresh = cv2.inRange(hsvim, lower, upper)
-    # cv2.imshow("Thresh", thresh)
+    file_path = folder_path + "/rows.txt"
+    with open(file_path, "w") as f:
+        for idx in range(img.shape[0]):
+            white_count = 0
+            for elem in img[idx, :]:
+                if np.all(elem == 255):
+                    white_count += 1
+            f.write(str(white_count) + "\n")
+        f.close()
 
-    # draw the contours on the empty image
-    accurately_contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    file_path = folder_path + "/cols.txt"
+    with open(file_path, "w") as f:
+        for idx in range(img.shape[1]):
+            white_count = 0
+            for elem in img[:, idx]:
+                if np.all(elem == 255):
+                    white_count += 1
+            f.write(str(white_count) + "\n")
+        f.close()
 
-    accurately_contours = max(accurately_contours, key=lambda x: cv2.contourArea(x))
 
-    return thresh
+def resize_hand_image(img, des_w, des_h):
+    dim = (des_w, des_h)  # итоговые размеры
+
+    # Масштабируем картинку
+    resized_img = cv2.resize(img, dsize=dim, interpolation=cv2.INTER_AREA)
+
+    return resized_img
 
 
-def accurately_segmentation(img):
-    global accurately_contours
+def rotate_hand_image(img, multi_hand_landmarks_list):
+    if multi_hand_landmarks_list:
+        for hand_landmarks in multi_hand_landmarks_list[0]:
+            # Get the coordinates of the first point and middle finger
+            x0 = hand_landmarks[0].x * img.shape[1]
+            y0 = hand_landmarks[0].y * img.shape[0]
+            x_middle_finger = hand_landmarks[12].x * img.shape[1]
+            y_middle_finger = hand_landmarks[12].y * img.shape[0]
 
-    thresh = find_accurate_contour(img)
-    thresh[:] = 0
-    mask = cv2.drawContours(thresh, [accurately_contours], -1, 255, -1)
-    img[mask != 255] = (255, 255, 255)
-    return img
+            # Calculate the rotation angle
+            c = math.sqrt((x_middle_finger - x0) ** 2 + (y_middle_finger - y0) ** 2)
+            angle = math.degrees(math.asin((x_middle_finger - x0) / c))
+
+            # Rotate the image based on the calculated angle
+            height, width, _ = img.shape
+            center = (width // 2, height // 2)
+            rotation_matrix = cv2.getRotationMatrix2D(center, angle, scale=1.0)
+
+            # Calculate the dimensions of the rotated image
+            cos_theta = np.abs(rotation_matrix[0, 0])
+            sin_theta = np.abs(rotation_matrix[0, 1])
+            new_width = int((height * sin_theta) + (width * cos_theta))
+            new_height = int((height * cos_theta) + (width * sin_theta))
+
+            # Adjust the rotation matrix to account for translation
+            rotation_matrix[0, 2] += (new_width / 2) - (width / 2)
+            rotation_matrix[1, 2] += (new_height / 2) - (height / 2)
+
+            straightened_image = cv2.warpAffine(img, rotation_matrix, (new_width, new_height))
+            cv2.imshow("rotated image", straightened_image)
+
+        return straightened_image
+    else:
+        return None
 
 
 # Function to extract hand contour
@@ -57,90 +92,194 @@ def extract_hand_contour(hand_landmarks, width, height):
     return contour
 
 
-def hand_segmentation(image, multi_hand_landmarks_list, i):
-    global rect
-    cropped_image = np.ndarray
-    img = image
-    # Check if hands are detected
+def crop_hand_image(img):
+    # Convert the image to grayscale
+    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    inverted = np.invert(gray_img)
+    # apply binary thresholding
+    ret, thresh = cv2.threshold(inverted, 1, 255, cv2.THRESH_BINARY)
+    contour, _ = cv2.findContours(thresh.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Sort the contours by area (optional)
+    contour = sorted(contour, key=cv2.contourArea, reverse=True)
+
+    # Select the largest contour
+    largest_contour = contour[0]
+
+    rectangle = cv2.boundingRect(largest_contour)
+    return rectangle
+
+
+def draw_ellipse(image, width, top, bottom, color):
+    # Define bottom and top points of the finger
+    x_top, y_top = top
+    x_bottom, y_bottom = bottom
+    x_top += 10
+    y_top += 10
+
+    # Calculate the angle between the two points
+    c = math.sqrt((x_top - x_bottom) ** 2 + (y_top - y_bottom) ** 2)
+    angle = math.degrees(math.asin(abs(x_top - x_bottom) / c))
+
+    # Draw the ellipse aligned with the finger direction
+    if x_bottom > x_top:
+        if y_bottom < y_top:
+            angle = 0 - angle
+    else:
+        if y_bottom > y_top:
+            angle = 0 - angle
+
+    ellipse_center = ((x_bottom + x_top) // 2, (y_bottom + y_top) // 2)
+    ellipse_axes = (int(width - 10) // 2, abs(y_top - y_bottom) // 2)
+    image = cv2.ellipse(image, ellipse_center, ellipse_axes, int(angle), 0, 360, color, -1)
+    return image
+
+
+def color_hand(img, multi_hand_landmarks_list):
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    colored_image = np.full_like(img, 255)
     if multi_hand_landmarks_list:
-        # Convert the image to BGR color
-        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        for hand_landmarks in multi_hand_landmarks_list[0]:
+            x_thumb = []
+            y_thumb = []
+            x_pointer_finger = []
+            y_pointer_finger = []
+            x_middle_finger = []
+            y_middle_finger = []
+            x_ring_finger = []
+            y_ring_finger = []
+            x_little_finger = []
+            y_little_finger = []
+            for idx, landmark in enumerate(hand_landmarks):
+                if idx in [3, 4]:
+                    x_thumb.append(int(landmark.x * colored_image.shape[1]))
+                    y_thumb.append(int(landmark.y * colored_image.shape[0]))
+                elif idx in [7, 8]:
+                    x_pointer_finger.append(int(landmark.x * colored_image.shape[1]))
+                    y_pointer_finger.append(int(landmark.y * colored_image.shape[0]))
+                elif idx in [11, 12]:
+                    x_middle_finger.append(int(landmark.x * colored_image.shape[1]))
+                    y_middle_finger.append(int(landmark.y * colored_image.shape[0]))
+                elif idx in [15, 16]:
+                    x_ring_finger.append(int(landmark.x * colored_image.shape[1]))
+                    y_ring_finger.append(int(landmark.y * colored_image.shape[0]))
+                elif idx in [19, 20]:
+                    x_little_finger.append(int(landmark.x * colored_image.shape[1]))
+                    y_little_finger.append(int(landmark.y * colored_image.shape[0]))
 
-        # Iterate over detected hands
-        for hand_landmarks in multi_hand_landmarks_list[i]:
-            # Extract hand contour
-            contour = extract_hand_contour(hand_landmarks, image.shape[1], image.shape[0])
+            x0 = x_thumb[0]
+            x1 = x_thumb[1]
+            y0 = y_thumb[0]
+            y1 = y_thumb[1]
+            thumb_width = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
 
-            # Create a mask for the hand contour
-            mask = np.full_like(image_bgr, 0, dtype=np.uint8)
+            x0 = x_pointer_finger[0]
+            x1 = x_pointer_finger[1]
+            y0 = y_pointer_finger[0]
+            y1 = y_pointer_finger[1]
+            pointer_width = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
 
-            # Crop the image using the hand contour
-            rect = cv2.boundingRect(contour)
-            mask = cv2.rectangle(mask, rect, (255, 255, 255), cv2.FILLED)
-            image_bgr = cv2.bitwise_and(image_bgr, mask)
-            cropped_image = accurately_segmentation(image_bgr)
-            x, y, w, h = rect
-            img = cropped_image[y:y + h, x:x + w]
+            x0 = x_middle_finger[0]
+            x1 = x_middle_finger[1]
+            y0 = y_middle_finger[0]
+            y1 = y_middle_finger[1]
+            middle_width = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
 
-        return img, cropped_image
+            x0 = x_ring_finger[0]
+            x1 = x_ring_finger[1]
+            y0 = y_ring_finger[0]
+            y1 = y_ring_finger[1]
+            ring_width = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
 
+            x0 = x_little_finger[0]
+            x1 = x_little_finger[1]
+            y0 = y_little_finger[0]
+            y1 = y_little_finger[1]
+            little_width = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+
+            hand_contour = []
+            indexes = [0, 1, 5, 9, 13, 17]
+            for idx in indexes:
+                x = int(hand_landmarks[idx].x * colored_image.shape[1])
+                y = int(hand_landmarks[idx].y * colored_image.shape[0])
+                hand_contour.append([x, y])
+            hand_contour = cv2.convexHull(np.array(hand_contour, dtype=np.int32))
+
+            colored_image = cv2.fillConvexPoly(colored_image, hand_contour, (255, 255, 0))
+
+            x0 = int(hand_landmarks[1].x * colored_image.shape[1])
+            x1 = int(x_thumb[1])
+            y0 = int(y_thumb[1])
+            y1 = int(hand_landmarks[1].y * colored_image.shape[0])
+            colored_image = draw_ellipse(colored_image, thumb_width, (x1, y1), (x0, y0), (173, 216, 230))
+
+            x0 = int(hand_landmarks[5].x * colored_image.shape[1])
+            x1 = int(x_pointer_finger[1])
+            y0 = int(y_pointer_finger[1])
+            y1 = int(hand_landmarks[5].y * colored_image.shape[0])
+            colored_image = draw_ellipse(colored_image, pointer_width, (x1, y1), (x0, y0), (128, 0, 128))
+
+            x0 = int(hand_landmarks[9].x * colored_image.shape[1])
+            x1 = int(x_middle_finger[1])
+            y0 = int(y_middle_finger[1])
+            y1 = int(hand_landmarks[9].y * colored_image.shape[0])
+            colored_image = draw_ellipse(colored_image, middle_width, (x1, y1), (x0, y0), (255, 0, 0))
+
+            x0 = int(hand_landmarks[13].x * colored_image.shape[1])
+            x1 = int(x_ring_finger[1])
+            y0 = int(y_ring_finger[1])
+            y1 = int(hand_landmarks[13].y * colored_image.shape[0])
+            colored_image = draw_ellipse(colored_image, ring_width, (x1, y1), (x0, y0), (124, 252, 0))
+
+            x0 = int(hand_landmarks[17].x * colored_image.shape[1])
+            x1 = int(x_little_finger[1])
+            y0 = int(y_little_finger[1])
+            y1 = int(hand_landmarks[17].y * colored_image.shape[0])
+            colored_image = draw_ellipse(colored_image, little_width, (x1, y1), (x0, y0), (255, 165, 0))
+
+        return colored_image
     else:
-        return img, cropped_image
+        return None
 
 
-def resize_hand_image(img):
-    desired_width = 200  # желаемая ширина
-
-    # соотношение сторон: ширина, делённая на ширину оригинала
-    aspect_ratio = desired_width / image_wh.shape[1]
-
-    # желаемая высота: высота, умноженная на соотношение сторон
-    desired_height = int(image_wh.shape[0] * aspect_ratio)
-
-    dim = (desired_width, desired_height)  # итоговые размеры
-
-    # Масштабируем картинку
-    resized_img = cv2.resize(img, dsize=dim, interpolation=cv2.INTER_AREA)
-
-    return resized_img
-
-
-def save_and_display_image(image, skeleton_flag, multi_hand_landmarks_list, i):
-    global image_wh
+def save_image(image, skeleton_flag, multi_hand_landmarks_list, folder_path, image_num):
     if skeleton_flag:
-        x, y, w, h = rect
-        img = image[y:y + h, x:x + w]
-        img = Image.fromarray(img)
-        img.show()
-        path = filedialog.asksaveasfilename()
-        img.save(path)
-        image = image_wh[y:y + h, x:x + w]
-        image = brush.hand_painting(image)
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(image)
-        path = filedialog.asksaveasfilename()
-        img.save(path)
-        img.show()
-        img = resize_hand_image(image)
-        path = filedialog.asksaveasfilename()
-        img = Image.fromarray(img)
-        img.save(path)
-        img.show()
+        img = color_hand(image, multi_hand_landmarks_list)
+        image = Image.fromarray(img)
+        path = folder_path + "/" + str(image_num) + ".jpg"
+        image_num += 1
+        image.save(path)
+
+        rectangle = crop_hand_image(img)
+        img = rotate_hand_image(img, multi_hand_landmarks_list)
+        x, y, w, h = rectangle
+        y += 40
+        h += 40
+        x += 20
+        w += 20
+        img = img[y:y + h, x:x + w]
+        image = Image.fromarray(img)
+        path = folder_path + "/" + str(image_num) + ".jpg"
+        image_num += 1
+        image.save(path)
+
+        img = resize_hand_image(img, 200, 150)
+        image = Image.fromarray(img)
+        path = folder_path + "/" + str(image_num) + ".jpg"
+        image_num += 1
+        image.save(path)
+
+        count_white_points(img, folder_path)
     else:
         img = Image.fromarray(image)
-        img.show()
-        path = filedialog.asksaveasfilename()
+        path = folder_path + "/" + str(image_num) + ".jpg"
+        image_num += 1
         img.save(path)
 
-        cropped_image, image_wh = hand_segmentation(image, multi_hand_landmarks_list, i)
-        cropped_image = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2RGB)
-        cropped_image = Image.fromarray(cropped_image)
-        cropped_image.show()
-        path = filedialog.asksaveasfilename()
-        cropped_image.save(path)
+    return image_num
 
 
-def display_hand_landmarks(images, results, skeleton_flag):
+def display_hand_landmarks(images, results, skeleton_flag, folder_path, image_num):
     """Displays hand landmarks."""
     # Images and landmarks.
     images = [image.numpy_view() for image in images]
@@ -168,16 +307,16 @@ def display_hand_landmarks(images, results, skeleton_flag):
                 mp_drawing_styles.get_default_hand_connections_style())
 
         if skeleton_flag and multi_hand_landmarks_list:
-            include_numeration = input("Do you want to include numeration of hand landmarks? (y/n): ")
-            if include_numeration.lower() == 'y':
-                for hand_landmarks in multi_hand_landmarks_list[i]:
-                    for idx, landmark in enumerate(hand_landmarks):
-                        # Convert normalized coordinates to pixel values
-                        x = int(landmark.x * image.shape[1])
-                        y = int(landmark.y * image.shape[0])
+            for hand_landmarks in multi_hand_landmarks_list[i]:
+                for idx, landmark in enumerate(hand_landmarks):
+                    # Convert normalized coordinates to pixel values
+                    x = int(landmark.x * image.shape[1])
+                    y = int(landmark.y * image.shape[0])
 
-                        # Add a numbered label next to each landmark
-                        cv2.putText(annotated_image, str(idx), (x + 5, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                    (0, 0, 0), 1, cv2.LINE_AA)
+                    # Add a numbered label next to each landmark
+                    cv2.putText(annotated_image, str(idx), (x + 5, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (0, 0, 0), 1, cv2.LINE_AA)
 
-        save_and_display_image(annotated_image, skeleton_flag, multi_hand_landmarks_list, i)
+        image_num = save_image(annotated_image, skeleton_flag, multi_hand_landmarks_list, folder_path, image_num)
+
+    return image_num
