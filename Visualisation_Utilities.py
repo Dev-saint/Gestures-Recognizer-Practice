@@ -14,7 +14,6 @@ rect = []
 
 
 def count_white_points(img, folder_path):
-
     file_path = folder_path + "/rows.txt"
     with open(file_path, "w") as f:
         for idx in range(img.shape[0]):
@@ -45,38 +44,71 @@ def resize_hand_image(img, des_w, des_h):
     return resized_img
 
 
+def overlay(img):
+    background = np.full_like(img, 255)
+    background = resize_hand_image(background, img.shape[1] + 500, img.shape[0] + 500)
+    b = Image.fromarray(background)
+    a = Image.fromarray(img)
+    b.paste(a, (100, 100))
+    b.save('fon_pillow_paste_pos.jpg', quality=95)
+    background = cv2.imread('fon_pillow_paste_pos.jpg')
+    return background
+
+
 def rotate_hand_image(img, multi_hand_landmarks_list):
     if multi_hand_landmarks_list:
         for hand_landmarks in multi_hand_landmarks_list[0]:
-            # Get the coordinates of the first point and middle finger
+            # Get the coordinates of the first point and top finger
+            max_c = math.sqrt((hand_landmarks[4].x - hand_landmarks[0].x) ** 2 + (hand_landmarks[4].y -
+                                                                                  hand_landmarks[0].y) ** 2)
+            x1 = hand_landmarks[4].x * img.shape[1]
+            y1 = hand_landmarks[4].y * img.shape[0]
+            for idx in [8, 12, 16, 20]:
+                current_c = math.sqrt((hand_landmarks[idx].x - hand_landmarks[0].x) ** 2 + (hand_landmarks[idx].y -
+                                                                                            hand_landmarks[0].y) ** 2)
+                if max_c < current_c:
+                    x1 = hand_landmarks[idx].x * img.shape[1]
+                    y1 = hand_landmarks[idx].y * img.shape[0]
+                    max_c = current_c
+
             x0 = hand_landmarks[0].x * img.shape[1]
             y0 = hand_landmarks[0].y * img.shape[0]
-            x_middle_finger = hand_landmarks[12].x * img.shape[1]
-            y_middle_finger = hand_landmarks[12].y * img.shape[0]
+
+            height, width, _ = img.shape
+            h = height
+            w = width
+            if y1 > y0:
+                img = cv2.flip(img, 0)
+                height, width, _ = img.shape
 
             # Calculate the rotation angle
-            c = math.sqrt((x_middle_finger - x0) ** 2 + (y_middle_finger - y0) ** 2)
-            angle = math.degrees(math.asin((x_middle_finger - x0) / c))
+            c = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+            angle = math.degrees(math.asin((x1 - x0) / c))
 
             # Rotate the image based on the calculated angle
-            height, width, _ = img.shape
+            img = overlay(img)
             center = (width // 2, height // 2)
-            rotation_matrix = cv2.getRotationMatrix2D(center, angle, scale=1.0)
+            # Calculate the rotation matrix
+            rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1)
+            cos_theta = abs(rotation_matrix[0, 0])
+            sin_theta = abs(rotation_matrix[0, 1])
 
-            # Calculate the dimensions of the rotated image
-            cos_theta = np.abs(rotation_matrix[0, 0])
-            sin_theta = np.abs(rotation_matrix[0, 1])
+            # Calculate the new dimensions of the rotated image
             new_width = int((height * sin_theta) + (width * cos_theta))
             new_height = int((height * cos_theta) + (width * sin_theta))
 
-            # Adjust the rotation matrix to account for translation
-            rotation_matrix[0, 2] += (new_width / 2) - (width / 2)
-            rotation_matrix[1, 2] += (new_height / 2) - (height / 2)
+            # Adjust the rotation matrix translation values to avoid cropping
+            rotation_matrix[0, 2] += (new_width - width) // 2
+            rotation_matrix[1, 2] += (new_height - height) // 2
 
-            straightened_image = cv2.warpAffine(img, rotation_matrix, (new_width, new_height))
-            cv2.imshow("rotated image", straightened_image)
+            # Apply the rotation to the image
+            rotated_image = cv2.warpAffine(img, rotation_matrix, (new_width, new_height))
+            rotated_image = resize_hand_image(rotated_image, width, height)
+            x = 100
+            y = 100
+            rotated_image = rotated_image[y:y + h, x:x + w]
 
-        return straightened_image
+        return rotated_image
     else:
         return None
 
@@ -93,29 +125,30 @@ def extract_hand_contour(hand_landmarks, width, height):
 
 
 def crop_hand_image(img):
-    # Convert the image to grayscale
-    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    inverted = np.invert(gray_img)
-    # apply binary thresholding
-    ret, thresh = cv2.threshold(inverted, 1, 255, cv2.THRESH_BINARY)
-    contour, _ = cv2.findContours(thresh.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    gray_image = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    thresh = cv2.inRange(gray_image, 1, 254)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-    # Sort the contours by area (optional)
-    contour = sorted(contour, key=cv2.contourArea, reverse=True)
+    list_of_pts = [pt[0] for ctr in contours for pt in ctr]
 
-    # Select the largest contour
-    largest_contour = contour[0]
+    contour = np.array(list_of_pts).reshape((-1, 1, 2)).astype(np.int32)
+    contour = cv2.convexHull(contour)
 
-    rectangle = cv2.boundingRect(largest_contour)
+    rectangle = cv2.boundingRect(contour)
     return rectangle
 
 
 def draw_ellipse(image, width, top, bottom, color):
     # Define bottom and top points of the finger
+
     x_top, y_top = top
     x_bottom, y_bottom = bottom
-    x_top += 10
-    y_top += 10
+
+    if image.shape[0] >= image.shape[1]:
+        x_bottom -= 35
+        x_top -= 35
+        y_bottom += 5
+        y_top += 5
 
     # Calculate the angle between the two points
     c = math.sqrt((x_top - x_bottom) ** 2 + (y_top - y_bottom) ** 2)
@@ -130,7 +163,8 @@ def draw_ellipse(image, width, top, bottom, color):
             angle = 0 - angle
 
     ellipse_center = ((x_bottom + x_top) // 2, (y_bottom + y_top) // 2)
-    ellipse_axes = (int(width - 10) // 2, abs(y_top - y_bottom) // 2)
+    ellipse_axes = (int(abs(width)) // 2, abs(y_top - y_bottom) // 2)
+
     image = cv2.ellipse(image, ellipse_center, ellipse_axes, int(angle), 0, 360, color, -1)
     return image
 
@@ -242,8 +276,20 @@ def color_hand(img, multi_hand_landmarks_list):
         return None
 
 
+def to_white(img):
+    gray_image = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    thresh = cv2.inRange(gray_image, 1, 255)
+    img[thresh == 0] = 255
+
+    return img
+
+
 def save_image(image, skeleton_flag, multi_hand_landmarks_list, folder_path, image_num):
     if skeleton_flag:
+        img = Image.fromarray(image)
+        path = folder_path + "/" + str(image_num) + ".jpg"
+        image_num += 1
+        img.save(path)
         img = color_hand(image, multi_hand_landmarks_list)
         image = Image.fromarray(img)
         path = folder_path + "/" + str(image_num) + ".jpg"
@@ -252,12 +298,16 @@ def save_image(image, skeleton_flag, multi_hand_landmarks_list, folder_path, ima
 
         rectangle = crop_hand_image(img)
         img = rotate_hand_image(img, multi_hand_landmarks_list)
+        img = to_white(img)
         x, y, w, h = rectangle
-        y += 40
-        h += 40
-        x += 20
-        w += 20
+        y -= 125
+        y = max(y, 0)
+        h += 100
+        x -= 75
+        x = max(x, 0)
+        w += 100
         img = img[y:y + h, x:x + w]
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(img)
         path = folder_path + "/" + str(image_num) + ".jpg"
         image_num += 1
